@@ -8,6 +8,12 @@
 
 ## Development
 
+### Clone the repository
+
+```bash
+git clone https://github.com/hairbui76/aspnet-core-template-auth.git
+```
+
 ### Install dependencies
 
 ```bash
