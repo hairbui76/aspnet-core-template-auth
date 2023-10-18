@@ -1,8 +1,10 @@
+using System.Text.Json.Serialization;
 using CSBackend.Configs;
 using CSBackend.Models;
 using CSBackend.Services;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson.Serialization.Attributes;
 using StackExchange.Redis;
 
 namespace CSBackend.Controllers;
@@ -13,17 +15,11 @@ public class AuthController : ControllerBase
 {
 	private readonly UserService _userService;
 	private readonly ILogger<AuthController> _logger;
-	private readonly IDataProtectionProvider _dataProtectionProvider;
-	private readonly IDataProtector _protector;
-	private readonly IDatabase _redis;
 
-	public AuthController(ILogger<AuthController> logger, IDataProtectionProvider dataProtectionProvider, IConnectionMultiplexer muxer, UserService userService)
+	public AuthController(ILogger<AuthController> logger, UserService userService)
 	{
 		_logger = logger;
 		_userService = userService;
-		_dataProtectionProvider = dataProtectionProvider;
-		_protector = _dataProtectionProvider.CreateProtector("auth");
-		_redis = muxer.GetDatabase();
 	}
 
 	[HttpGet]
@@ -39,16 +35,13 @@ public class AuthController : ControllerBase
 		else
 		{
 			var info = user.GetPublicInfo();
-			var accessToken = Configs.Paseto.Encode(info, Config.TOKEN.SECRET);
-			var accessExp = DateTime.Now.AddHours(Config.TOKEN.TOKEN_EXPIRE_HOURS);
-			await _redis.StringSetAsync("ac_" + user.Id, true, accessExp.TimeOfDay);
-			accessToken = _protector.Protect(accessToken);
-			Response.Cookies.Append("access_token", accessToken, new CookieOptions
+			var access = await _userService.PrepareAccessToken(info);
+			Response.Cookies.Append("access_token", access.Item1, new CookieOptions
 			{
 				Secure = Config.ENV == "production",
 				HttpOnly = true,
 				Path = "/",
-				Expires = accessExp,
+				Expires = access.Item2,
 			});
 			return Ok(new { message = "Authenticated!!", user = info });
 		}
@@ -60,17 +53,42 @@ public class AuthController : ControllerBase
 	[HttpGet("{id:length(24)}")]
 	public async Task<ActionResult<User>> Get(string id)
 	{
-		var user = await _userService.GetAsync(id);
+		var user = await _userService.GetAsyncById(id);
 		if (user == null)
-			return NotFound();
+			return NotFound(new { message = "User not found" });
 		return user;
 	}
 
 	[HttpPost]
-	public string Login(string username, string password)
+	public async Task<IActionResult> Login([FromBody] LoginModel model)
 	{
-		Console.WriteLine(username, password);
-		return "login" + username + " " + password;
+		if (model.Username == null)
+			return Unauthorized(new { message = "Username is required" });
+		if (model.Password == null)
+			return Unauthorized(new { message = "Password is required" });
+		User? user = await _userService.GetAsyncByUsername(model.Username);
+		if (user == null)
+			return NotFound(new { message = "User not found" });
+		bool isPasswordMatch = Password.Verify(user.Password, model.Password);
+		if (!isPasswordMatch)
+			return Unauthorized(new { message = "Username or password incorrect" });
+		var info = user.GetPublicInfo();
+		var tasks = await Task.WhenAll(_userService.PrepareAccessToken(info), _userService.PrepareRefreshToken(info));
+		Response.Cookies.Append("access_token", tasks[0].Item1, new CookieOptions
+		{
+			Secure = Config.ENV == "production",
+			HttpOnly = true,
+			Path = "/",
+			Expires = tasks[0].Item2,
+		});
+		Response.Cookies.Append("refresh_token", tasks[1].Item1, new CookieOptions
+		{
+			Secure = Config.ENV == "production",
+			HttpOnly = true,
+			Path = "/",
+			Expires = tasks[1].Item2,
+		});
+		return Ok(new { message = "Login sucessfully", user = info });
 	}
 
 	[HttpPost]
@@ -79,29 +97,37 @@ public class AuthController : ControllerBase
 		newUser.Password = Password.Hash(newUser.Password);
 		await _userService.CreateAsync(newUser);
 		var info = newUser.GetPublicInfo();
-		var accessToken = Configs.Paseto.Encode(info, Config.TOKEN.SECRET);
-		var refreshToken = Configs.Paseto.Encode(info, Config.TOKEN.REFRESH_SECRET);
-		var accessExp = DateTime.Now.AddHours(Config.TOKEN.TOKEN_EXPIRE_HOURS);
-		var refreshExp = DateTime.Now.AddDays(Config.TOKEN.REFRESH_TOKEN_EXPIRE_WEEKS * 7);
-		var a = _redis.StringSetAsync("ac_" + newUser.Id, true, accessExp.TimeOfDay);
-		var b = _redis.StringSetAsync("rf_" + newUser.Id, true, refreshExp.TimeOfDay);
-		await Task.WhenAll(a, b);
-		accessToken = _protector.Protect(accessToken);
-		refreshToken = _protector.Protect(refreshToken);
-		Response.Cookies.Append("access_token", accessToken, new CookieOptions
+		var tasks = await Task.WhenAll(_userService.PrepareAccessToken(info), _userService.PrepareRefreshToken(info));
+		Response.Cookies.Append("access_token", tasks[0].Item1, new CookieOptions
 		{
 			Secure = Config.ENV == "production",
 			HttpOnly = true,
 			Path = "/",
-			Expires = accessExp,
+			Expires = tasks[0].Item2,
 		});
-		Response.Cookies.Append("refresh_token", refreshToken, new CookieOptions
+		Response.Cookies.Append("refresh_token", tasks[1].Item1, new CookieOptions
 		{
 			Secure = Config.ENV == "production",
 			HttpOnly = true,
 			Path = "/",
-			Expires = refreshExp,
+			Expires = tasks[1].Item2,
 		});
 		return CreatedAtAction(nameof(Get), new { id = newUser.Id }, newUser);
 	}
+
+	[HttpPost]
+	public IActionResult Logout()
+	{
+		Response.Cookies.Delete("access_token");
+		Response.Cookies.Delete("refresh_token");
+		return Ok(new { message = "Logout successfully" });
+	}
+}
+
+public class LoginModel
+{
+	[BsonElement("username")]
+	public string? Username { get; set; }
+	[BsonElement("password")]
+	public string? Password { get; set; }
 }

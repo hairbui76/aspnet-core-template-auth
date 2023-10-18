@@ -42,7 +42,7 @@ app.MapGet("/", () => "Hello, world!");
 
 app.UsePathBase(new PathString("/api"));
 
-app.UseWhen(context => context.Request.Method == "GET" && context.Request.Path.StartsWithSegments("/auth"), appBuilder =>
+app.UseWhen(context => context.Request.Path == "/auth", appBuilder =>
 {
 	appBuilder.UseMiddleware<VerifyToken>();
 });

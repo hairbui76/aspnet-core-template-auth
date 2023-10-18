@@ -18,13 +18,15 @@ public class User : Model
 	public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 	[BsonElement("updated_at")]
 	public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
-	public object GetPublicInfo()
+	public PublicInfo GetPublicInfo()
 	{
-		return new
-		{
-			Id,
-			Name,
-			Username
-		};
+		return new PublicInfo { Id = Id, Name = Name, Username = Username };
 	}
+}
+
+public class PublicInfo
+{
+	public string? Id { get; set; }
+	public required string Name { get; set; }
+	public required string Username { get; set; }
 }
